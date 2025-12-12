@@ -30,6 +30,7 @@ target_link_libraries(xmass_tree PRIVATE glfw OpenGL::GL)
 
 if(WIN32)
     target_link_libraries(xmass_tree PRIVATE shell32 advapi32)
+    target_compile_definitions(xmass_tree PRIVATE UNICODE _UNICODE)
 endif()
 
 install(TARGETS xmass_tree RUNTIME DESTINATION .)
