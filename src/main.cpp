@@ -11,6 +11,10 @@
 
 #include <GLFW/glfw3.h>
 
+#ifndef GL_MULTISAMPLE
+#define GL_MULTISAMPLE 0x809D
+#endif
+
 #include <algorithm>
 #include <array>
 #include <chrono>
