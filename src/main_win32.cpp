@@ -1,3 +1,6 @@
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -38,8 +41,52 @@ struct AppState {
 
 static AppState g_state{};
 
+static constexpr COLORREF kTransparentKey = RGB(255, 0, 255);
+static bool g_clickThrough = false;
+
+static void ApplyOverlayStyles(HWND hwnd) {
+    LONG_PTR ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+    ex |= WS_EX_LAYERED | WS_EX_TOPMOST;
+    if (g_clickThrough) {
+        ex |= WS_EX_TRANSPARENT;
+    } else {
+        ex &= ~WS_EX_TRANSPARENT;
+    }
+    SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex);
+    SetLayeredWindowAttributes(hwnd, kTransparentKey, 0, LWA_COLORKEY);
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
 static int ClampInt(int v, int lo, int hi) {
     return std::max(lo, std::min(hi, v));
+}
+
+static COLORREF AdjustColor(COLORREF c, int delta) {
+    int r = ClampInt(GetRValue(c) + delta, 0, 255);
+    int g = ClampInt(GetGValue(c) + delta, 0, 255);
+    int b = ClampInt(GetBValue(c) + delta, 0, 255);
+    return RGB(r, g, b);
+}
+
+static TRIVERTEX MakeVertex(int x, int y, COLORREF c) {
+    TRIVERTEX v{};
+    v.x = x;
+    v.y = y;
+    v.Red = static_cast<COLOR16>(GetRValue(c) << 8);
+    v.Green = static_cast<COLOR16>(GetGValue(c) << 8);
+    v.Blue = static_cast<COLOR16>(GetBValue(c) << 8);
+    v.Alpha = 0x0000;
+    return v;
+}
+
+static void FillTriangleGradient(HDC hdc, const POINT (&tri)[3], COLORREF top, COLORREF bottom) {
+    TRIVERTEX verts[3] = {
+        MakeVertex(tri[0].x, tri[0].y, top),
+        MakeVertex(tri[1].x, tri[1].y, bottom),
+        MakeVertex(tri[2].x, tri[2].y, bottom),
+    };
+    GRADIENT_TRIANGLE gt{0, 1, 2};
+    GradientFill(hdc, verts, 3, &gt, 1, GRADIENT_FILL_TRIANGLE);
 }
 
 static float RandFloat(std::mt19937& rng, float lo, float hi) {
@@ -130,10 +177,10 @@ static void DrawTree(HDC hdc) {
     const int baseY = static_cast<int>(h * 0.80);
     const int tierHeight = static_cast<int>((baseY - topY) / 3.0);
 
-    HBRUSH treeBrush = CreateSolidBrush(RGB(10, 120, 40));
-    HPEN treePen = CreatePen(PS_SOLID, 2, RGB(5, 90, 30));
-    HGDIOBJ oldBrush = SelectObject(hdc, treeBrush);
+    COLORREF baseGreen = RGB(8, 120, 45);
+    HPEN treePen = CreatePen(PS_SOLID, 2, RGB(5, 80, 30));
     HGDIOBJ oldPen = SelectObject(hdc, treePen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
 
     for (int tier = 0; tier < 3; ++tier) {
         int y0 = topY + tier * tierHeight;
@@ -146,10 +193,13 @@ static void DrawTree(HDC hdc) {
             {cx - halfW1, y1},
             {cx + halfW1, y1},
         };
+        COLORREF topC = AdjustColor(baseGreen, 35 - tier * 8);
+        COLORREF bottomC = AdjustColor(baseGreen, -10 - tier * 6);
+        FillTriangleGradient(hdc, tri, topC, bottomC);
         Polygon(hdc, tri, 3);
 
         // subtle highlight
-        HPEN highlightPen = CreatePen(PS_SOLID, 1, RGB(30, 160, 70));
+        HPEN highlightPen = CreatePen(PS_SOLID, 1, AdjustColor(baseGreen, 70));
         SelectObject(hdc, highlightPen);
         MoveToEx(hdc, cx, y0, nullptr);
         LineTo(hdc, cx - halfW1, y1);
@@ -157,10 +207,43 @@ static void DrawTree(HDC hdc) {
         LineTo(hdc, cx + halfW1, y1);
         SelectObject(hdc, treePen);
         DeleteObject(highlightPen);
+
+        // garland with beads
+        int garlandY = y0 + static_cast<int>((y1 - y0) * 0.60);
+        float t = static_cast<float>(garlandY - y0) / static_cast<float>(y1 - y0);
+        int garlandHalfW = static_cast<int>(t * halfW1);
+        constexpr int segments = 24;
+        std::array<POINT, segments + 1> garlandPts{};
+        float phase = static_cast<float>(g_state.blinkPhase) * 0.10f + tier * 0.8f;
+        for (int i = 0; i <= segments; ++i) {
+            float u = static_cast<float>(i) / segments;
+            int x = cx - garlandHalfW + static_cast<int>(u * garlandHalfW * 2);
+            float wave = std::sin(u * 3.1415926f * 2.0f + phase) * (tierHeight * 0.07f);
+            garlandPts[i] = {x, garlandY + static_cast<int>(wave)};
+        }
+        HPEN garlandPen = CreatePen(PS_SOLID, 2, RGB(255, 210, 80));
+        HGDIOBJ oldGarPen = SelectObject(hdc, garlandPen);
+        Polyline(hdc, garlandPts.data(), static_cast<int>(garlandPts.size()));
+        SelectObject(hdc, oldGarPen);
+        DeleteObject(garlandPen);
+
+        for (int i = 0; i <= segments; i += 3) {
+            POINT p = garlandPts[i];
+            int r = 3 + (i % 2);
+            bool on = ((g_state.blinkPhase / 6 + i) % 2) == 0;
+            COLORREF bead = on ? RGB(255, 80, 80) : RGB(240, 240, 255);
+            HBRUSH beadBrush = CreateSolidBrush(bead);
+            HGDIOBJ oldB = SelectObject(hdc, beadBrush);
+            HGDIOBJ oldBeadPen = SelectObject(hdc, GetStockObject(NULL_PEN));
+            Ellipse(hdc, p.x - r, p.y - r, p.x + r, p.y + r);
+            SelectObject(hdc, oldBeadPen);
+            SelectObject(hdc, oldB);
+            DeleteObject(beadBrush);
+        }
     }
 
     // trunk
-    HBRUSH trunkBrush = CreateSolidBrush(RGB(120, 70, 30));
+    HBRUSH trunkBrush = CreateSolidBrush(RGB(120, 65, 28));
     SelectObject(hdc, trunkBrush);
     int trunkW = static_cast<int>(w * 0.06);
     int trunkH = static_cast<int>(h * 0.10);
@@ -168,31 +251,58 @@ static void DrawTree(HDC hdc) {
     DeleteObject(trunkBrush);
 
     // star
-    HBRUSH starBrush = CreateSolidBrush(RGB(255, 220, 70));
-    HPEN starPen = CreatePen(PS_SOLID, 2, RGB(255, 200, 20));
+    int starY = topY - static_cast<int>(h * 0.02);
+    int outer = static_cast<int>(w * 0.035);
+    int inner = static_cast<int>(w * 0.017);
+    HBRUSH glowBrush = CreateSolidBrush(AdjustColor(RGB(255, 220, 70), 25));
+    HPEN glowPen = CreatePen(PS_SOLID, 1, AdjustColor(RGB(255, 200, 20), 40));
+    SelectObject(hdc, glowBrush);
+    SelectObject(hdc, glowPen);
+    DrawStar(hdc, cx, starY, outer + 4, inner + 2);
+    DeleteObject(glowBrush);
+    DeleteObject(glowPen);
+
+    HBRUSH starBrush = CreateSolidBrush(RGB(255, 215, 60));
+    HPEN starPen = CreatePen(PS_SOLID, 2, RGB(255, 190, 10));
     SelectObject(hdc, starBrush);
     SelectObject(hdc, starPen);
-    DrawStar(hdc, cx, topY - static_cast<int>(h * 0.02), static_cast<int>(w * 0.03), static_cast<int>(w * 0.015));
+    DrawStar(hdc, cx, starY, outer, inner);
     DeleteObject(starBrush);
     DeleteObject(starPen);
 
     SelectObject(hdc, oldBrush);
     SelectObject(hdc, oldPen);
-    DeleteObject(treeBrush);
     DeleteObject(treePen);
 }
 
 static void DrawOrnaments(HDC hdc) {
     for (const auto& o : g_state.ornaments) {
         COLORREF c = o.on ? o.colorA : o.colorB;
+        int glowR = o.radius + (o.on ? 3 : 1);
+        HBRUSH glow = CreateSolidBrush(AdjustColor(c, 40));
+        HGDIOBJ oldB = SelectObject(hdc, glow);
+        HGDIOBJ oldPGlow = SelectObject(hdc, GetStockObject(NULL_PEN));
+        Ellipse(hdc, o.pos.x - glowR, o.pos.y - glowR, o.pos.x + glowR, o.pos.y + glowR);
+        SelectObject(hdc, oldPGlow);
+        SelectObject(hdc, oldB);
+        DeleteObject(glow);
+
         HBRUSH b = CreateSolidBrush(c);
-        HPEN p = CreatePen(PS_SOLID, 1, RGB(20, 20, 20));
-        HGDIOBJ oldB = SelectObject(hdc, b);
+        HPEN p = CreatePen(PS_SOLID, 1, RGB(25, 25, 25));
+        oldB = SelectObject(hdc, b);
         HGDIOBJ oldP = SelectObject(hdc, p);
 
         Ellipse(hdc, o.pos.x - o.radius, o.pos.y - o.radius, o.pos.x + o.radius, o.pos.y + o.radius);
 
         // tiny shine
+        if (o.radius >= 5) {
+            int innerR = o.radius - 2;
+            HBRUSH inner = CreateSolidBrush(AdjustColor(c, 25));
+            HGDIOBJ oldInner = SelectObject(hdc, inner);
+            Ellipse(hdc, o.pos.x - innerR, o.pos.y - innerR, o.pos.x + innerR, o.pos.y + innerR);
+            SelectObject(hdc, oldInner);
+            DeleteObject(inner);
+        }
         SetPixel(hdc, o.pos.x - o.radius / 3, o.pos.y - o.radius / 3, RGB(255, 255, 255));
 
         SelectObject(hdc, oldB);
@@ -203,15 +313,19 @@ static void DrawOrnaments(HDC hdc) {
 }
 
 static void DrawSnow(HDC hdc) {
-    HBRUSH snowBrush = CreateSolidBrush(RGB(255, 255, 255));
-    HGDIOBJ old = SelectObject(hdc, snowBrush);
+    HBRUSH whiteBrush = CreateSolidBrush(RGB(255, 255, 255));
+    HBRUSH blueBrush = CreateSolidBrush(RGB(230, 240, 255));
+    HGDIOBJ old = SelectObject(hdc, whiteBrush);
     for (const auto& s : g_state.snowflakes) {
         int x = static_cast<int>(s.x);
         int y = static_cast<int>(s.y);
+        HBRUSH use = (s.radius >= 3) ? blueBrush : whiteBrush;
+        SelectObject(hdc, use);
         Ellipse(hdc, x - s.radius, y - s.radius, x + s.radius, y + s.radius);
     }
     SelectObject(hdc, old);
-    DeleteObject(snowBrush);
+    DeleteObject(whiteBrush);
+    DeleteObject(blueBrush);
 }
 
 static void UpdateAnimation() {
@@ -246,8 +360,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         GetClientRect(hwnd, &rc);
         RegenerateScene(rc.right - rc.left, rc.bottom - rc.top);
         SetTimer(hwnd, 1, 33, nullptr);
+        ApplyOverlayStyles(hwnd);
         return 0;
     }
+    case WM_ERASEBKGND:
+        return 1;
     case WM_SIZE: {
         int w = LOWORD(lParam);
         int h = HIWORD(lParam);
@@ -260,26 +377,65 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
+    case WM_LBUTTONDOWN:
+        ReleaseCapture();
+        SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        return 0;
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE || wParam == 'Q') {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (wParam == 'C') {
+            g_clickThrough = !g_clickThrough;
+            ApplyOverlayStyles(hwnd);
+            return 0;
+        }
+        return 0;
+    case WM_RBUTTONUP: {
+        HMENU menu = CreatePopupMenu();
+        AppendMenu(menu, MF_STRING, 1, g_clickThrough ? L"Disable Click-Through (C)" : L"Enable Click-Through (C)");
+        AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenu(menu, MF_STRING, 2, L"Exit (Esc)");
+        POINT pt{};
+        GetCursorPos(&pt);
+        SetForegroundWindow(hwnd);
+        int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+        DestroyMenu(menu);
+        if (cmd == 1) {
+            g_clickThrough = !g_clickThrough;
+            ApplyOverlayStyles(hwnd);
+        } else if (cmd == 2) {
+            DestroyWindow(hwnd);
+        }
+        return 0;
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps{};
         HDC hdc = BeginPaint(hwnd, &ps);
 
         RECT rc{};
         GetClientRect(hwnd, &rc);
-        HBRUSH bg = CreateSolidBrush(RGB(8, 18, 40));
-        FillRect(hdc, &rc, bg);
-        DeleteObject(bg);
 
-        // ground snow
-        RECT ground = rc;
-        ground.top = static_cast<LONG>(g_state.height * 0.82);
-        HBRUSH groundBrush = CreateSolidBrush(RGB(240, 245, 255));
-        FillRect(hdc, &ground, groundBrush);
-        DeleteObject(groundBrush);
+        int w = rc.right - rc.left;
+        int h = rc.bottom - rc.top;
+        HDC mem = CreateCompatibleDC(hdc);
+        HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
+        HGDIOBJ oldBmp = SelectObject(mem, bmp);
 
-        DrawTree(hdc);
-        DrawOrnaments(hdc);
-        DrawSnow(hdc);
+        HBRUSH keyBrush = CreateSolidBrush(kTransparentKey);
+        FillRect(mem, &rc, keyBrush);
+        DeleteObject(keyBrush);
+
+        DrawTree(mem);
+        DrawOrnaments(mem);
+        DrawSnow(mem);
+
+        BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
+
+        SelectObject(mem, oldBmp);
+        DeleteObject(bmp);
+        DeleteDC(mem);
 
         EndPaint(hwnd, &ps);
         return 0;
@@ -301,7 +457,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     wc.hInstance = hInstance;
     wc.lpszClassName = CLASS_NAME;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hbrBackground = nullptr;
     wc.style = CS_HREDRAW | CS_VREDRAW;
 
     if (!RegisterClass(&wc)) {
@@ -309,15 +465,22 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         return 0;
     }
 
+    RECT work{};
+    SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
+    int winW = 420;
+    int winH = 520;
+    int x = work.right - winW - 20;
+    int y = work.bottom - winH - 20;
+
     HWND hwnd = CreateWindowEx(
-        0,
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         CLASS_NAME,
         L"Xmass Tree",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        900,
-        700,
+        WS_POPUP,
+        x,
+        y,
+        winW,
+        winH,
         nullptr,
         nullptr,
         hInstance,

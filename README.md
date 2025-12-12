@@ -1,10 +1,23 @@
 # Xmass Tree (C++ Desktop App)
 
-A tiny Christmas tree app written in C++. On Windows it’s a Win32 desktop GUI with blinking ornaments and falling snow. On macOS/Linux it currently builds a console “tree” animation so CI can produce binaries everywhere (GUI port welcome).
+A tiny cross‑platform “desktop sticker” Christmas tree. It opens as a borderless, transparent, always‑on‑top overlay with blinking ornaments and falling snow on Windows, macOS, and Linux. Rendering uses GLFW + OpenGL for identical behavior everywhere.
 
 ## Build (CMake)
 
-Prereq: install CMake and a C++ toolchain (Visual Studio or MinGW) and make sure `cmake` is on your PATH.
+Prereq: install CMake and a C++ toolchain and make sure `cmake` is on your PATH. The build pulls GLFW automatically via CMake FetchContent.
+
+### Windows
+- Install Visual Studio (Desktop C++ workload) and CMake.
+
+### macOS
+- Install Xcode Command Line Tools: `xcode-select --install`
+- Install CMake (e.g., Homebrew `brew install cmake`).
+
+### Ubuntu / Debian
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake xorg-dev libgl1-mesa-dev
+```
 
 ### Visual Studio / MSVC
 ```powershell
@@ -20,13 +33,9 @@ cmake --build build
 .\build\xmass_tree.exe
 ```
 
-## Build (No CMake, MSVC)
-From a **Developer Command Prompt for VS**:
-```powershell
-cl /std:c++17 /EHsc /DUNICODE /D_UNICODE src\main_win32.cpp user32.lib gdi32.lib /Fe:xmass_tree.exe /link /SUBSYSTEM:WINDOWS
-.\xmass_tree.exe
-```
-
 ## Notes
-- Resize the window; the tree, ornaments, and snow re-layout automatically.
-- Animation is timer‑driven (~30 FPS).
+- The overlay opens bottom‑right; drag with left mouse to move.
+- Press `C` to toggle click‑through so you can interact with apps behind it.
+- Press `R` to re‑randomize ornaments/snow for the current size.
+- Press `Esc` or `Q` to close.
+- Legacy sources `src/main_win32.cpp` and `src/main_console.cpp` are kept for reference but are not built.

@@ -4,16 +4,26 @@ project(xmass_tree_app LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(WIN32)
-    add_executable(xmass_tree WIN32
-        src/main_win32.cpp
-    )
-    target_compile_definitions(xmass_tree PRIVATE UNICODE _UNICODE)
-    target_link_libraries(xmass_tree PRIVATE user32 gdi32)
-else()
-    add_executable(xmass_tree
-        src/main_console.cpp
-    )
-endif()
+include(FetchContent)
+
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG 3.4
+)
+FetchContent_MakeAvailable(glfw)
+
+find_package(OpenGL REQUIRED)
+
+add_executable(xmass_tree WIN32
+    src/main.cpp
+)
+
+target_link_libraries(xmass_tree PRIVATE glfw OpenGL::GL)
 
 install(TARGETS xmass_tree RUNTIME DESTINATION .)
