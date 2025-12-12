@@ -54,7 +54,6 @@ static void RenderTree(int height, const std::vector<Light>& lights, const std::
         }
         std::cout << "\n";
     }
-}
 
     int trunkHeight = std::max(3, height / 5);
     int trunkWidth = 3;
