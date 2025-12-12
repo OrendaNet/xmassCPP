@@ -28,4 +28,8 @@ add_executable(xmass_tree WIN32
 
 target_link_libraries(xmass_tree PRIVATE glfw OpenGL::GL)
 
+if(WIN32)
+    target_link_libraries(xmass_tree PRIVATE shell32 advapi32)
+endif()
+
 install(TARGETS xmass_tree RUNTIME DESTINATION .)

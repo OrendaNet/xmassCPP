@@ -7,12 +7,19 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
+#include <winreg.h>
 #endif
 
 #include <GLFW/glfw3.h>
 
 #ifndef GL_MULTISAMPLE
 #define GL_MULTISAMPLE 0x809D
+#endif
+
+#ifdef _WIN32
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
 #endif
 
 #include <algorithm>
@@ -109,6 +116,267 @@ static double g_dragStartScreenX = 0.0;
 static double g_dragStartScreenY = 0.0;
 static int g_dragStartWinX = 0;
 static int g_dragStartWinY = 0;
+
+static void SetClickThrough(GLFWwindow* window, bool enabled) {
+    g_clickThrough = enabled;
+    glfwSetWindowAttrib(window, GLFW_MOUSE_PASSTHROUGH, enabled ? GLFW_TRUE : GLFW_FALSE);
+    if (enabled) {
+        g_dragging = false;
+    }
+}
+
+#ifdef _WIN32
+static GLFWwindow* g_overlayWindow = nullptr;
+static HWND g_trayHwnd = nullptr;
+static UINT g_taskbarCreatedMsg = 0;
+static bool g_startupEnabled = false;
+
+static constexpr UINT kTrayCallbackMsg = WM_APP + 42;
+static constexpr UINT kTrayId = 1;
+
+static constexpr UINT kMenuToggleShow = 1001;
+static constexpr UINT kMenuToggleClickThrough = 1002;
+static constexpr UINT kMenuToggleStartup = 1003;
+static constexpr UINT kMenuExit = 1099;
+
+static std::wstring GetExePath() {
+    std::array<wchar_t, 4096> buf{};
+    DWORD len = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (len == 0 || len >= buf.size()) {
+        return L"";
+    }
+    return std::wstring(buf.data(), buf.data() + len);
+}
+
+static bool IsStartupEnabled() {
+    HKEY key{};
+    if (RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            0,
+            KEY_QUERY_VALUE,
+            &key) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    DWORD type = 0;
+    DWORD size = 0;
+    LONG res = RegQueryValueExW(key, L"XmassTree", nullptr, &type, nullptr, &size);
+    RegCloseKey(key);
+    return res == ERROR_SUCCESS && type == REG_SZ;
+}
+
+static bool SetStartupEnabled(bool enabled) {
+    HKEY key{};
+    if (RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            0,
+            nullptr,
+            0,
+            KEY_SET_VALUE,
+            nullptr,
+            &key,
+            nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    LONG res = ERROR_SUCCESS;
+    if (enabled) {
+        std::wstring exe = GetExePath();
+        if (exe.empty()) {
+            RegCloseKey(key);
+            return false;
+        }
+        std::wstring value = L"\"" + exe + L"\"";
+        res = RegSetValueExW(
+            key,
+            L"XmassTree",
+            0,
+            REG_SZ,
+            reinterpret_cast<const BYTE*>(value.c_str()),
+            static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    } else {
+        res = RegDeleteValueW(key, L"XmassTree");
+        if (res == ERROR_FILE_NOT_FOUND) {
+            res = ERROR_SUCCESS;
+        }
+    }
+
+    RegCloseKey(key);
+    return res == ERROR_SUCCESS;
+}
+
+static void SetWindowToolStyle(GLFWwindow* window) {
+    HWND hwnd = glfwGetWin32Window(window);
+    LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    ex |= WS_EX_TOOLWINDOW;
+    ex &= ~WS_EX_APPWINDOW;
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+}
+
+static void ToggleOverlayVisible() {
+    if (!g_overlayWindow) return;
+    int visible = glfwGetWindowAttrib(g_overlayWindow, GLFW_VISIBLE);
+    if (visible == GLFW_TRUE) {
+        glfwHideWindow(g_overlayWindow);
+        g_dragging = false;
+    } else {
+        glfwShowWindow(g_overlayWindow);
+        glfwFocusWindow(g_overlayWindow);
+    }
+}
+
+static void ShowTrayMenu(HWND hwnd) {
+    HMENU menu = CreatePopupMenu();
+    bool visible = g_overlayWindow && glfwGetWindowAttrib(g_overlayWindow, GLFW_VISIBLE) == GLFW_TRUE;
+    AppendMenuW(menu, MF_STRING, kMenuToggleShow, visible ? L"Hide Overlay" : L"Show Overlay");
+
+    UINT clickFlags = MF_STRING;
+    if (g_clickThrough) clickFlags |= MF_CHECKED;
+    AppendMenuW(menu, clickFlags, kMenuToggleClickThrough, L"Click-Through (C)");
+
+    UINT startupFlags = MF_STRING;
+    if (g_startupEnabled) startupFlags |= MF_CHECKED;
+    AppendMenuW(menu, startupFlags, kMenuToggleStartup, L"Start On Startup");
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kMenuExit, L"Exit");
+
+    POINT pt{};
+    GetCursorPos(&pt);
+    SetForegroundWindow(hwnd);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+    PostMessageW(hwnd, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+}
+
+static void CreateOrUpdateTrayIcon(bool create) {
+    if (!g_trayHwnd) return;
+
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_trayHwnd;
+    nid.uID = kTrayId;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = kTrayCallbackMsg;
+    nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wcscpy_s(nid.szTip, L"Xmass Tree");
+
+    if (create) {
+        Shell_NotifyIconW(NIM_ADD, &nid);
+        nid.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &nid);
+    } else {
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+static void DeleteTrayIcon() {
+    if (!g_trayHwnd) return;
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_trayHwnd;
+    nid.uID = kTrayId;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+static LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == kTrayCallbackMsg) {
+        switch (lParam) {
+        case WM_LBUTTONUP:
+        case WM_LBUTTONDBLCLK:
+            ToggleOverlayVisible();
+            return 0;
+        case WM_RBUTTONUP:
+        case WM_CONTEXTMENU:
+            ShowTrayMenu(hwnd);
+            return 0;
+        default:
+            return 0;
+        }
+    }
+
+    if (msg == WM_COMMAND) {
+        switch (LOWORD(wParam)) {
+        case kMenuToggleShow:
+            ToggleOverlayVisible();
+            return 0;
+        case kMenuToggleClickThrough:
+            if (g_overlayWindow) {
+                SetClickThrough(g_overlayWindow, !g_clickThrough);
+            }
+            return 0;
+        case kMenuToggleStartup: {
+            bool want = !g_startupEnabled;
+            if (SetStartupEnabled(want)) {
+                g_startupEnabled = want;
+            }
+            return 0;
+        }
+        case kMenuExit:
+            if (g_overlayWindow) {
+                glfwSetWindowShouldClose(g_overlayWindow, GLFW_TRUE);
+            }
+            return 0;
+        default:
+            return 0;
+        }
+    }
+
+    if (g_taskbarCreatedMsg != 0 && msg == g_taskbarCreatedMsg) {
+        CreateOrUpdateTrayIcon(true);
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static bool InitTray(GLFWwindow* overlayWindow) {
+    g_overlayWindow = overlayWindow;
+    g_startupEnabled = IsStartupEnabled();
+    if (!g_startupEnabled) {
+        if (SetStartupEnabled(true)) {
+            g_startupEnabled = true;
+        }
+    }
+    g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
+
+    const wchar_t kClassName[] = L"XmassTreeTrayWindow";
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = TrayWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kClassName;
+
+    if (!RegisterClassW(&wc)) {
+        if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            return false;
+        }
+    }
+
+    g_trayHwnd = CreateWindowExW(
+        0,
+        kClassName,
+        L"",
+        0,
+        0,
+        0,
+        0,
+        0,
+        HWND_MESSAGE,
+        nullptr,
+        wc.hInstance,
+        nullptr);
+
+    if (!g_trayHwnd) {
+        return false;
+    }
+
+    CreateOrUpdateTrayIcon(true);
+    return true;
+}
+#endif
 
 static float RandFloat(std::mt19937& rng, float lo, float hi) {
     std::uniform_real_distribution<float> dist(lo, hi);
@@ -532,11 +800,7 @@ static void KeyCallback(GLFWwindow* window, int key, int, int action, int) {
     }
 
     if (key == GLFW_KEY_C) {
-        g_clickThrough = !g_clickThrough;
-        glfwSetWindowAttrib(window, GLFW_MOUSE_PASSTHROUGH, g_clickThrough ? GLFW_TRUE : GLFW_FALSE);
-        if (g_clickThrough) {
-            g_dragging = false;
-        }
+        SetClickThrough(window, !g_clickThrough);
         return;
     }
 
@@ -587,6 +851,18 @@ static void CursorPosCallback(GLFWwindow* window, double x, double y) {
     glfwSetWindowPos(window, newWinX, newWinY);
 }
 
+static void WindowCloseCallback(GLFWwindow* window) {
+#ifdef _WIN32
+    // Keep running from tray; hide instead of exiting.
+    if (g_trayHwnd) {
+        glfwSetWindowShouldClose(window, GLFW_FALSE);
+        glfwHideWindow(window);
+        g_dragging = false;
+        return;
+    }
+#endif
+}
+
 static void PositionBottomRight(GLFWwindow* window, int winW, int winH) {
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
     int mx = 0, my = 0, mw = 0, mh = 0;
@@ -629,20 +905,31 @@ int main() {
     glfwSetKeyCallback(window, KeyCallback);
     glfwSetMouseButtonCallback(window, MouseButtonCallback);
     glfwSetCursorPosCallback(window, CursorPosCallback);
+    glfwSetWindowCloseCallback(window, WindowCloseCallback);
 
     int fbW, fbH;
     glfwGetFramebufferSize(window, &fbW, &fbH);
     RegenerateScene(fbW, fbH);
     PositionBottomRight(window, initialW, initialH);
 
-    glfwSetWindowAttrib(window, GLFW_MOUSE_PASSTHROUGH, GLFW_FALSE);
+    SetClickThrough(window, false);
+
+#ifdef _WIN32
+    SetWindowToolStyle(window);
+    InitTray(window);
+#endif
 
     double lastTime = glfwGetTime();
     double accumulator = 0.0;
     const double step = 1.0 / 30.0;
 
     while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
+        bool visible = glfwGetWindowAttrib(window, GLFW_VISIBLE) == GLFW_TRUE;
+        if (!visible) {
+            glfwWaitEventsTimeout(0.25);
+        } else {
+            glfwPollEvents();
+        }
 
         double now = glfwGetTime();
         double dt = now - lastTime;
@@ -653,26 +940,36 @@ int main() {
             accumulator -= step;
         }
 
-        int w, h;
-        glfwGetFramebufferSize(window, &w, &h);
-        glViewport(0, 0, w, h);
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        glOrtho(0, w, h, 0, -1, 1);
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
+        if (visible) {
+            int w, h;
+            glfwGetFramebufferSize(window, &w, &h);
+            glViewport(0, 0, w, h);
+            glMatrixMode(GL_PROJECTION);
+            glLoadIdentity();
+            glOrtho(0, w, h, 0, -1, 1);
+            glMatrixMode(GL_MODELVIEW);
+            glLoadIdentity();
 
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
 
-        DrawTree();
-        DrawOrnaments();
-        DrawSnow();
+            DrawTree();
+            DrawOrnaments();
+            DrawSnow();
 
-        glfwSwapBuffers(window);
+            glfwSwapBuffers(window);
+        }
     }
+
+#ifdef _WIN32
+    DeleteTrayIcon();
+    if (g_trayHwnd) {
+        DestroyWindow(g_trayHwnd);
+        g_trayHwnd = nullptr;
+    }
+#endif
 
     glfwDestroyWindow(window);
     glfwTerminate();

@@ -39,3 +39,8 @@ cmake --build build
 - Press `R` to re‑randomize ornaments/snow for the current size.
 - Press `Esc` or `Q` to close.
 - Legacy sources `src/main_win32.cpp` and `src/main_console.cpp` are kept for reference but are not built.
+
+### Windows Tray + Startup
+- The app adds a tray icon on Windows.
+- Close (Alt+F4) hides the overlay; exit from the tray menu.
+- It enables **Start On Startup** automatically (toggle it from the tray menu).
