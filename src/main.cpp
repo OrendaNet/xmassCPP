@@ -66,10 +66,33 @@ struct Snowflake {
     float radius = 2.0f;
 };
 
+struct TreeLayer {
+    float y0 = 0.0f;
+    float y1 = 0.0f;
+    float halfW = 0.0f;
+};
+
+struct NeedleStroke {
+    float x1 = 0.0f;
+    float y1 = 0.0f;
+    float x2 = 0.0f;
+    float y2 = 0.0f;
+    Color c{};
+};
+
 struct AppState {
     int width = 800;
     int height = 600;
     int blinkPhase = 0;
+    int layerCount = 6;
+    float treeCx = 400.0f;
+    float treeTopY = 60.0f;
+    float treeBottomY = 480.0f;
+    float treeBaseHalfW = 200.0f;
+    float layerHeight = 80.0f;
+    float layerOverlap = 40.0f;
+    std::vector<TreeLayer> layers;
+    std::vector<NeedleStroke> needles;
     std::vector<Ornament> ornaments;
     std::vector<Snowflake> snowflakes;
     std::mt19937 rng{std::random_device{}()};
@@ -78,8 +101,8 @@ struct AppState {
 static AppState g_state{};
 static bool g_clickThrough = false;
 static bool g_dragging = false;
-static double g_dragStartCursorX = 0.0;
-static double g_dragStartCursorY = 0.0;
+static double g_dragStartScreenX = 0.0;
+static double g_dragStartScreenY = 0.0;
 static int g_dragStartWinX = 0;
 static int g_dragStartWinY = 0;
 
@@ -93,6 +116,43 @@ static int RandInt(std::mt19937& rng, int lo, int hi) {
     return dist(rng);
 }
 
+static void RebuildTreeGeometry() {
+    const int w = g_state.width;
+    const int h = g_state.height;
+
+    g_state.treeCx = w * 0.5f;
+    g_state.treeTopY = h * 0.11f;
+    g_state.treeBottomY = h * 0.80f;
+    g_state.treeBaseHalfW = w * 0.30f;
+
+    g_state.layerCount = ClampInt(w / 70, 5, 9);
+    g_state.layerHeight = (g_state.treeBottomY - g_state.treeTopY) / static_cast<float>(g_state.layerCount);
+    g_state.layerOverlap = g_state.layerHeight * 0.65f;
+
+    g_state.layers.clear();
+    g_state.layers.reserve(static_cast<size_t>(g_state.layerCount));
+
+    for (int i = 0; i < g_state.layerCount; ++i) {
+        float y0 = g_state.treeTopY + i * g_state.layerHeight;
+        float y1 = (i == g_state.layerCount - 1) ? g_state.treeBottomY : (y0 + g_state.layerHeight + g_state.layerOverlap);
+        float progress = static_cast<float>(i + 1) / static_cast<float>(g_state.layerCount);
+        float halfW = g_state.treeBaseHalfW * std::pow(progress, 1.25f);
+        g_state.layers.push_back({y0, y1, halfW});
+    }
+}
+
+static float TreeHalfWidthAtY(float y) {
+    float maxW = 0.0f;
+    for (const auto& layer : g_state.layers) {
+        if (y < layer.y0 || y > layer.y1) continue;
+        float denom = std::max(1.0f, layer.y1 - layer.y0);
+        float t = (y - layer.y0) / denom;
+        float w = t * layer.halfW;
+        maxW = std::max(maxW, w);
+    }
+    return maxW;
+}
+
 static void RegenerateScene(int w, int h) {
     g_state.width = std::max(200, w);
     g_state.height = std::max(200, h);
@@ -100,10 +160,7 @@ static void RegenerateScene(int w, int h) {
     const int width = g_state.width;
     const int height = g_state.height;
 
-    const int treeTopY = static_cast<int>(height * 0.10);
-    const int treeBaseY = static_cast<int>(height * 0.80);
-    const int treeCenterX = width / 2;
-    const int treeHalfWidthBase = static_cast<int>(width * 0.25);
+    RebuildTreeGeometry();
 
     const int ornamentCount = ClampInt((width * height) / 25000, 35, 140);
     g_state.ornaments.clear();
@@ -119,14 +176,14 @@ static void RegenerateScene(int w, int h) {
     };
 
     for (int i = 0; i < ornamentCount; ++i) {
-        float t = RandFloat(g_state.rng, 0.05f, 1.0f);
-        int y = treeTopY + static_cast<int>(t * (treeBaseY - treeTopY));
-        float halfW = t * treeHalfWidthBase;
-        int x = treeCenterX + static_cast<int>(RandFloat(g_state.rng, -halfW, halfW));
+        float t = std::pow(RandFloat(g_state.rng, 0.0f, 1.0f), 0.70f);
+        float y = g_state.treeTopY + t * (g_state.treeBottomY - g_state.treeTopY);
+        float halfW = TreeHalfWidthAtY(y) * 0.92f;
+        float x = g_state.treeCx + RandFloat(g_state.rng, -halfW, halfW);
 
         Ornament o;
-        o.x = static_cast<float>(x);
-        o.y = static_cast<float>(y);
+        o.x = x;
+        o.y = y;
         o.radius = static_cast<float>(RandInt(g_state.rng, 4, 9));
         int idxA = RandInt(g_state.rng, 0, static_cast<int>(palette.size() - 1));
         int idxB = RandInt(g_state.rng, 0, static_cast<int>(palette.size() - 1));
@@ -134,6 +191,31 @@ static void RegenerateScene(int w, int h) {
         o.colorB = palette[idxB];
         o.on = RandInt(g_state.rng, 0, 1) == 1;
         g_state.ornaments.push_back(o);
+    }
+
+    const int needleCount = ClampInt((width * height) / 900, 300, 2000);
+    g_state.needles.clear();
+    g_state.needles.reserve(static_cast<size_t>(needleCount));
+    for (int i = 0; i < needleCount; ++i) {
+        float t = std::pow(RandFloat(g_state.rng, 0.0f, 1.0f), 0.85f);
+        float y = g_state.treeTopY + t * (g_state.treeBottomY - g_state.treeTopY);
+        float halfW = TreeHalfWidthAtY(y) * 0.95f;
+        if (halfW < 6.0f) continue;
+        float x = g_state.treeCx + RandFloat(g_state.rng, -halfW, halfW);
+
+        float dir = (x < g_state.treeCx) ? -1.0f : 1.0f;
+        float len = RandFloat(g_state.rng, 2.5f, 6.5f);
+        float dy = RandFloat(g_state.rng, -1.4f, 1.4f);
+        float dx = dir * len;
+
+        NeedleStroke n;
+        n.x1 = x;
+        n.y1 = y;
+        n.x2 = x + dx;
+        n.y2 = y + dy;
+        n.c = AdjustColor(FromRGB(8, 120, 45), RandInt(g_state.rng, -22, 26));
+        n.c.a = 0.55f;
+        g_state.needles.push_back(n);
     }
 
     const int snowCount = ClampInt(width / 8, 60, 220);
@@ -184,113 +266,195 @@ static void DrawStar(float cx, float cy, float rOuter, float rInner, const Color
     glEnd();
 }
 
-static void DrawTree() {
-    const int w = g_state.width;
-    const int h = g_state.height;
-    const float cx = w / 2.0f;
+static void DrawSolidTriangle(float x0, float y0, float x1, float y1, float x2, float y2, const Color& c) {
+    SetColor(c);
+    glBegin(GL_TRIANGLES);
+    glVertex2f(x0, y0);
+    glVertex2f(x1, y1);
+    glVertex2f(x2, y2);
+    glEnd();
+}
 
-    const float topY = h * 0.10f;
-    const float baseY = h * 0.80f;
-    const float tierHeight = (baseY - topY) / 3.0f;
+static void DrawTriangleGradient(float x0, float y0, float x1, float y1, float x2, float y2, const Color& c0, const Color& c1, const Color& c2) {
+    glBegin(GL_TRIANGLES);
+    SetColor(c0);
+    glVertex2f(x0, y0);
+    SetColor(c1);
+    glVertex2f(x1, y1);
+    SetColor(c2);
+    glVertex2f(x2, y2);
+    glEnd();
+}
+
+static void DrawNeedles() {
+    glLineWidth(1.0f);
+    glBegin(GL_LINES);
+    for (const auto& n : g_state.needles) {
+        SetColor(n.c);
+        glVertex2f(n.x1, n.y1);
+        glVertex2f(n.x2, n.y2);
+    }
+    glEnd();
+}
+
+static void DrawLayerGarland(int layerIndex, float y0, float y1, float halfW) {
+    float garlandY = y0 + (y1 - y0) * 0.72f;
+    float t = (garlandY - y0) / std::max(1.0f, (y1 - y0));
+    float garlandHalfW = t * halfW;
+    int segments = ClampInt(static_cast<int>(halfW / 10.0f), 18, 32);
+    std::array<std::pair<float, float>, 40> pts{};
+
+    float phase = g_state.blinkPhase * 0.10f + layerIndex * 0.6f;
+    for (int i = 0; i <= segments; ++i) {
+        float u = static_cast<float>(i) / segments;
+        float x = g_state.treeCx - garlandHalfW + u * garlandHalfW * 2.0f;
+        float wave = std::sin(u * 3.1415926f * 2.0f + phase) * (g_state.layerHeight * 0.10f);
+        pts[static_cast<size_t>(i)] = {x, garlandY + wave};
+    }
+
+    Color garlandColor = FromRGB(255, 210, 80);
+    garlandColor.a = 0.9f;
+    glLineWidth(2.0f);
+    SetColor(garlandColor);
+    glBegin(GL_LINE_STRIP);
+    for (int i = 0; i <= segments; ++i) {
+        auto p = pts[static_cast<size_t>(i)];
+        glVertex2f(p.first, p.second);
+    }
+    glEnd();
+
+    for (int i = 0; i <= segments; i += 3) {
+        auto p = pts[static_cast<size_t>(i)];
+        float r = 2.7f + (i % 2);
+        bool on = ((g_state.blinkPhase / 6 + i + layerIndex * 2) % 2) == 0;
+        Color bead = on ? FromRGB(255, 80, 80) : FromRGB(240, 240, 255);
+        bead.a = on ? 1.0f : 0.9f;
+        DrawCircle(p.first, p.second, r, bead, 18);
+    }
+}
+
+static void DrawTree() {
+    const float cx = g_state.treeCx;
+    const float topY = g_state.treeTopY;
+    const float bottomY = g_state.treeBottomY;
 
     Color baseGreen = FromRGB(8, 120, 45);
-    Color outline = FromRGB(5, 80, 30);
+    Color outline = FromRGB(5, 80, 30, 0.55f);
+
+    // soft shadow behind the tree
+    Color shadow = FromRGB(0, 0, 0, 0.16f);
+    for (int i = g_state.layerCount - 1; i >= 0; --i) {
+        const auto& layer = g_state.layers[static_cast<size_t>(i)];
+        float y0 = layer.y0 + 5.0f;
+        float y1 = layer.y1 + 5.0f;
+        float hw = layer.halfW + 5.0f;
+        DrawSolidTriangle(cx, y0, cx - hw, y1, cx + hw, y1, shadow);
+    }
+
+    // trunk behind branches
+    float trunkW = g_state.treeBaseHalfW * 0.28f;
+    float trunkH = (bottomY - topY) * 0.18f;
+    float trunkTop = bottomY - trunkH * 0.15f;
+    Color trunkTopC = FromRGB(150, 88, 38);
+    Color trunkBottomC = FromRGB(92, 48, 18);
+    glBegin(GL_QUADS);
+    SetColor(trunkTopC);
+    glVertex2f(cx - trunkW / 2.0f, trunkTop);
+    glVertex2f(cx + trunkW / 2.0f, trunkTop);
+    SetColor(trunkBottomC);
+    glVertex2f(cx + trunkW / 2.0f, trunkTop + trunkH);
+    glVertex2f(cx - trunkW / 2.0f, trunkTop + trunkH);
+    glEnd();
 
     glLineWidth(2.0f);
 
-    for (int tier = 0; tier < 3; ++tier) {
-        float y0 = topY + tier * tierHeight;
-        float y1 = y0 + tierHeight + tierHeight * 0.4f;
-        float halfW1 = w * (0.22f + tier * 0.12f);
+    // layers from bottom -> top for correct overlap
+    for (int i = g_state.layerCount - 1; i >= 0; --i) {
+        const auto& layer = g_state.layers[static_cast<size_t>(i)];
+        float y0 = layer.y0;
+        float y1 = layer.y1;
+        float hw = layer.halfW;
 
-        float triX0 = cx;
-        float triY0 = y0;
-        float triX1 = cx - halfW1;
-        float triY1 = y1;
-        float triX2 = cx + halfW1;
-        float triY2 = y1;
+        float x0 = cx;
+        float x1 = cx - hw;
+        float x2 = cx + hw;
 
-        Color topC = AdjustColor(baseGreen, 35 - tier * 8);
-        Color bottomC = AdjustColor(baseGreen, -10 - tier * 6);
+        Color topC = AdjustColor(baseGreen, 40 - i * 4);
+        Color bottomC = AdjustColor(baseGreen, -18 - i * 3);
 
-        glBegin(GL_TRIANGLES);
-        SetColor(topC);
-        glVertex2f(triX0, triY0);
-        SetColor(bottomC);
-        glVertex2f(triX1, triY1);
-        glVertex2f(triX2, triY2);
-        glEnd();
+        DrawTriangleGradient(x0, y0, x1, y1, x2, y1, topC, bottomC, bottomC);
 
+        // subtle depth: darker underside near the bottom edge
+        float shadeH = std::max(10.0f, g_state.layerHeight * 0.28f);
+        Color underside = FromRGB(0, 0, 0, 0.08f);
+        DrawSolidTriangle(x0, y1 - shadeH * 0.55f, x1, y1, x2, y1, underside);
+
+        // inner sheen to make it feel less flat
+        Color sheen = AdjustColor(topC, 50);
+        sheen.a = 0.10f;
+        float innerScale = 0.55f;
+        DrawTriangleGradient(
+            x0,
+            y0 + g_state.layerHeight * 0.10f,
+            cx - hw * innerScale,
+            y1 - g_state.layerHeight * 0.15f,
+            cx + hw * innerScale,
+            y1 - g_state.layerHeight * 0.15f,
+            sheen,
+            sheen,
+            sheen);
+
+        // branch fringe along the bottom edge for a more realistic silhouette
+        int fringeCount = ClampInt(static_cast<int>(hw / 12.0f), 10, 26);
+        float fringeAmp = std::max(8.0f, g_state.layerHeight * 0.22f);
+        for (int j = 0; j < fringeCount; ++j) {
+            float u0 = static_cast<float>(j) / fringeCount;
+            float u2 = static_cast<float>(j + 1) / fringeCount;
+            float u1 = (u0 + u2) * 0.5f;
+            float bx0 = cx - hw + u0 * hw * 2.0f;
+            float bx2 = cx - hw + u2 * hw * 2.0f;
+            float bxc = cx - hw + u1 * hw * 2.0f;
+            float baseY = y1 - 1.0f;
+            float wobble = std::sin((u1 * 3.1415926f * 2.0f) + i * 0.8f) * (fringeAmp * 0.18f);
+            float tipY = y1 + fringeAmp * (0.55f + 0.45f * std::sin(j * 0.9f + i * 0.7f)) + wobble;
+            Color fringe = AdjustColor(bottomC, -10);
+            fringe.a = 0.96f;
+            DrawSolidTriangle(bx0, baseY, bxc, tipY, bx2, baseY, fringe);
+        }
+
+        // outline and highlights
         SetColor(outline);
-        glBegin(GL_LINE_LOOP);
-        glVertex2f(triX0, triY0);
-        glVertex2f(triX1, triY1);
-        glVertex2f(triX2, triY2);
+        glBegin(GL_LINE_STRIP);
+        glVertex2f(x1, y1);
+        glVertex2f(x0, y0);
+        glVertex2f(x2, y1);
         glEnd();
 
-        // subtle highlight lines
-        Color highlight = AdjustColor(baseGreen, 70);
-        highlight.a = 0.8f;
+        Color highlight = AdjustColor(baseGreen, 85);
+        highlight.a = 0.60f;
         SetColor(highlight);
         glBegin(GL_LINES);
-        glVertex2f(triX0, triY0);
-        glVertex2f(triX1, triY1);
-        glVertex2f(triX0, triY0);
-        glVertex2f(triX2, triY2);
+        glVertex2f(x0, y0);
+        glVertex2f(x1 + hw * 0.12f, y1 - g_state.layerHeight * 0.08f);
+        glVertex2f(x0, y0);
+        glVertex2f(x2 - hw * 0.12f, y1 - g_state.layerHeight * 0.08f);
         glEnd();
-
-        // garland
-        float garlandY = y0 + (y1 - y0) * 0.60f;
-        float t = (garlandY - y0) / (y1 - y0);
-        float garlandHalfW = t * halfW1;
-        constexpr int segments = 24;
-        std::array<std::pair<float, float>, segments + 1> garlandPts{};
-        float phase = g_state.blinkPhase * 0.10f + tier * 0.8f;
-        for (int i = 0; i <= segments; ++i) {
-            float u = static_cast<float>(i) / segments;
-            float x = cx - garlandHalfW + u * garlandHalfW * 2.0f;
-            float wave = std::sin(u * 3.1415926f * 2.0f + phase) * (tierHeight * 0.07f);
-            garlandPts[i] = {x, garlandY + wave};
-        }
-        Color garlandColor = FromRGB(255, 210, 80);
-        garlandColor.a = 0.9f;
-        glLineWidth(2.0f);
-        SetColor(garlandColor);
-        glBegin(GL_LINE_STRIP);
-        for (auto& p : garlandPts) {
-            glVertex2f(p.first, p.second);
-        }
-        glEnd();
-
-        for (int i = 0; i <= segments; i += 3) {
-            auto p = garlandPts[i];
-            float r = 3.0f + (i % 2);
-            bool on = ((g_state.blinkPhase / 6 + i) % 2) == 0;
-            Color bead = on ? FromRGB(255, 80, 80) : FromRGB(240, 240, 255);
-            bead.a = on ? 1.0f : 0.9f;
-            DrawCircle(p.first, p.second, r, bead);
-        }
     }
 
-    // trunk
-    float trunkW = w * 0.06f;
-    float trunkH = h * 0.10f;
-    Color trunk = FromRGB(120, 65, 28);
-    SetColor(trunk);
-    glBegin(GL_QUADS);
-    glVertex2f(cx - trunkW / 2.0f, baseY);
-    glVertex2f(cx + trunkW / 2.0f, baseY);
-    glVertex2f(cx + trunkW / 2.0f, baseY + trunkH);
-    glVertex2f(cx - trunkW / 2.0f, baseY + trunkH);
-    glEnd();
+    DrawNeedles();
+
+    for (int i = g_state.layerCount - 1; i >= 0; --i) {
+        const auto& layer = g_state.layers[static_cast<size_t>(i)];
+        DrawLayerGarland(i, layer.y0, layer.y1, layer.halfW);
+    }
 
     // star + glow
-    float starY = topY - h * 0.02f;
-    float outer = w * 0.035f;
-    float inner = w * 0.017f;
+    float starY = topY - g_state.height * 0.03f;
+    float outer = g_state.width * 0.040f;
+    float inner = g_state.width * 0.019f;
     Color glow = AdjustColor(FromRGB(255, 220, 70), 25);
-    glow.a = 0.45f;
-    DrawStar(cx, starY, outer + 4.0f, inner + 2.0f, glow);
+    glow.a = 0.40f;
+    DrawStar(cx, starY, outer + 6.0f, inner + 3.0f, glow);
 
     Color star = FromRGB(255, 215, 60);
     DrawStar(cx, starY, outer, inner, star);
@@ -386,8 +550,16 @@ static void MouseButtonCallback(GLFWwindow* window, int button, int action, int)
     if (button == GLFW_MOUSE_BUTTON_LEFT) {
         if (action == GLFW_PRESS) {
             g_dragging = true;
-            glfwGetCursorPos(window, &g_dragStartCursorX, &g_dragStartCursorY);
-            glfwGetWindowPos(window, &g_dragStartWinX, &g_dragStartWinY);
+            double cursorX = 0.0;
+            double cursorY = 0.0;
+            int winX = 0;
+            int winY = 0;
+            glfwGetCursorPos(window, &cursorX, &cursorY);
+            glfwGetWindowPos(window, &winX, &winY);
+            g_dragStartScreenX = winX + cursorX;
+            g_dragStartScreenY = winY + cursorY;
+            g_dragStartWinX = winX;
+            g_dragStartWinY = winY;
         } else if (action == GLFW_RELEASE) {
             g_dragging = false;
         }
@@ -397,9 +569,18 @@ static void MouseButtonCallback(GLFWwindow* window, int button, int action, int)
 static void CursorPosCallback(GLFWwindow* window, double x, double y) {
     if (!g_dragging || g_clickThrough) return;
 
-    int dx = static_cast<int>(x - g_dragStartCursorX);
-    int dy = static_cast<int>(y - g_dragStartCursorY);
-    glfwSetWindowPos(window, g_dragStartWinX + dx, g_dragStartWinY + dy);
+    int winX = 0;
+    int winY = 0;
+    glfwGetWindowPos(window, &winX, &winY);
+
+    double cursorScreenX = winX + x;
+    double cursorScreenY = winY + y;
+    int newWinX = g_dragStartWinX + static_cast<int>(std::lround(cursorScreenX - g_dragStartScreenX));
+    int newWinY = g_dragStartWinY + static_cast<int>(std::lround(cursorScreenY - g_dragStartScreenY));
+    if (newWinX == winX && newWinY == winY) {
+        return;
+    }
+    glfwSetWindowPos(window, newWinX, newWinY);
 }
 
 static void PositionBottomRight(GLFWwindow* window, int winW, int winH) {
@@ -419,6 +600,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_ANY_PROFILE);
+    glfwWindowHint(GLFW_SAMPLES, 4);
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
     glfwWindowHint(GLFW_FLOATING, GLFW_TRUE);
     glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
@@ -434,6 +616,10 @@ int main() {
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
+
+    glEnable(GL_MULTISAMPLE);
+    glEnable(GL_LINE_SMOOTH);
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
 
     glfwSetFramebufferSizeCallback(window, FramebufferSizeCallback);
     glfwSetKeyCallback(window, KeyCallback);
