@@ -138,6 +138,53 @@ static constexpr UINT kMenuToggleShow = 1001;
 static constexpr UINT kMenuToggleClickThrough = 1002;
 static constexpr UINT kMenuToggleStartup = 1003;
 static constexpr UINT kMenuExit = 1099;
+static constexpr UINT kMenuHeader = 1100;
+
+static int GetMenuIconSizePx() {
+    int cx = GetSystemMetrics(SM_CXSMICON);
+    int cy = GetSystemMetrics(SM_CYSMICON);
+    int size = std::min(cx > 0 ? cx : 16, cy > 0 ? cy : 16);
+    return std::max(16, size);
+}
+
+static HBITMAP CreateMenuBitmapFromIcon(HICON icon, int sizePx) {
+    if (!icon || sizePx <= 0) return nullptr;
+    HDC screen = GetDC(nullptr);
+    if (!screen) return nullptr;
+    HDC mem = CreateCompatibleDC(screen);
+    if (!mem) {
+        ReleaseDC(nullptr, screen);
+        return nullptr;
+    }
+    HBITMAP bmp = CreateCompatibleBitmap(screen, sizePx, sizePx);
+    if (!bmp) {
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+        return nullptr;
+    }
+
+    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+    RECT rc{0, 0, sizePx, sizePx};
+    HBRUSH bg = CreateSolidBrush(GetSysColor(COLOR_MENU));
+    FillRect(mem, &rc, bg);
+    DeleteObject(bg);
+
+    DrawIconEx(mem, 0, 0, icon, sizePx, sizePx, 0, nullptr, DI_NORMAL);
+
+    SelectObject(mem, oldBmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    return bmp;
+}
+
+static void SetMenuItemBitmap(HMENU menu, UINT itemId, HBITMAP bmp) {
+    if (!menu || !bmp) return;
+    MENUITEMINFOW mii{};
+    mii.cbSize = sizeof(mii);
+    mii.fMask = MIIM_BITMAP;
+    mii.hbmpItem = bmp;
+    SetMenuItemInfoW(menu, itemId, FALSE, &mii);
+}
 
 static std::wstring GetExePath() {
     std::array<wchar_t, 4096> buf{};
@@ -230,6 +277,15 @@ static void ToggleOverlayVisible() {
 
 static void ShowTrayMenu(HWND hwnd) {
     HMENU menu = CreatePopupMenu();
+    MENUINFO mi{};
+    mi.cbSize = sizeof(mi);
+    mi.fMask = MIM_STYLE;
+    mi.dwStyle = MNS_CHECKORBMP;
+    SetMenuInfo(menu, &mi);
+
+    AppendMenuW(menu, MF_STRING | MF_DISABLED | MF_GRAYED, kMenuHeader, L"Xmass Tree");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
     bool visible = g_overlayWindow && glfwGetWindowAttrib(g_overlayWindow, GLFW_VISIBLE) == GLFW_TRUE;
     AppendMenuW(menu, MF_STRING, kMenuToggleShow, visible ? L"Hide Overlay" : L"Show Overlay");
 
@@ -242,7 +298,21 @@ static void ShowTrayMenu(HWND hwnd) {
     AppendMenuW(menu, startupFlags, kMenuToggleStartup, L"Start On Startup");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kMenuExit, L"Exit");
+    AppendMenuW(menu, MF_STRING, kMenuExit, L"Close");
+
+    int iconSize = GetMenuIconSizePx();
+    HICON appIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    HICON showIcon = LoadIconW(nullptr, IDI_INFORMATION);
+    HICON closeIcon = LoadIconW(nullptr, IDI_ERROR);
+    if (!showIcon) showIcon = appIcon;
+    if (!closeIcon) closeIcon = appIcon;
+
+    HBITMAP bmpHeader = CreateMenuBitmapFromIcon(appIcon, iconSize);
+    HBITMAP bmpShow = CreateMenuBitmapFromIcon(showIcon, iconSize);
+    HBITMAP bmpClose = CreateMenuBitmapFromIcon(closeIcon, iconSize);
+    SetMenuItemBitmap(menu, kMenuHeader, bmpHeader);
+    SetMenuItemBitmap(menu, kMenuToggleShow, bmpShow);
+    SetMenuItemBitmap(menu, kMenuExit, bmpClose);
 
     POINT pt{};
     GetCursorPos(&pt);
@@ -250,6 +320,9 @@ static void ShowTrayMenu(HWND hwnd) {
     TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
     PostMessageW(hwnd, WM_NULL, 0, 0);
     DestroyMenu(menu);
+    if (bmpHeader) DeleteObject(bmpHeader);
+    if (bmpShow) DeleteObject(bmpShow);
+    if (bmpClose) DeleteObject(bmpClose);
 }
 
 static void CreateOrUpdateTrayIcon(bool create) {
