@@ -2,6 +2,13 @@
 #define GL_SILENCE_DEPRECATION
 #endif
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
@@ -482,3 +489,8 @@ int main() {
     return 0;
 }
 
+#ifdef _WIN32
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    return main();
+}
+#endif
